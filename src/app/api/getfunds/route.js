@@ -33,6 +33,7 @@ export async function GET() {
   })
 
   let dates = await GetUniquePeriods(filesPath, files)
+  funds.reverse();
 
   return NextResponse.json(
     {
