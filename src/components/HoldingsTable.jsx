@@ -89,6 +89,12 @@ const columns = helper.columns([
     sortFn: "alphanumeric",
     cell: (info) => info.getValue() || "—",
   }),
+  helper.accessor("Reference Rate", {
+    header: "Reference Rate",
+    filterFn: "includesString",
+    sortFn: "alphanumeric",
+    cell: (info) => info.getValue() || "—",
+  }),
   helper.accessor("Fair Value", {
     header: "Fair Value",
     sortFn: "basic",

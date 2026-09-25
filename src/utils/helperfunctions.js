@@ -26,3 +26,24 @@ export async function readCSVFile(fund) {
     const parsedData = papa.parse(fileContent, { header: true, skipEmptyLines: true });
     return parsedData;
 }
+
+export async function getallfunds(){
+    const filesPath = path.join(process.cwd(), "src/Data");
+    const files = await fs.readdir(filesPath);
+    
+    let funds = files.map((f) => {
+        return f.split(".")[0];
+    })
+
+    return funds;
+}
+
+export function classifyCategory(typeOfInvestment) {
+    const DEBT_KEYWORDS = ["debt", "loan", "lien", "note", "bond", "revolver", "unitranche", "subordinated", "credit facility", "draw"];
+    const EQUITY_KEYWORDS = ["equity", "stock", "warrant", "unit", "partnership", "preferred", "common", "membership", "shares", "interest", "member", "participation"];
+
+    const t = (typeOfInvestment || "").toLowerCase();
+    if (DEBT_KEYWORDS.some((k) => t.includes(k))) return "Debt";
+    if (EQUITY_KEYWORDS.some((k) => t.includes(k))) return "Equity";
+    return "Other";
+}

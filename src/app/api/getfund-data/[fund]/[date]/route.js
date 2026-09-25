@@ -1,78 +1,49 @@
 import {NextResponse} from "next/server";
-import fs from 'fs/promises';
-import path from 'path';
-import papa from 'papaparse';
-import { normalizePeriod, cleanedNumber, cleanIndustry, readCSVFile} from "@/utils/helperfunctions.js";
+import db from "@/db/conn-db.js";
 
 
-function sumCost_FV(data, date) {
-    data = data.filter(obj => normalizePeriod(obj["Reporting Period"]) == date);
-    let number_of_rows = data.length;
-    let totalCost = data.reduce((sum, obj) => {
-        return sum + (cleanedNumber(obj["Cost"]) || 0);
-    }, 0)
+function sumCost_FV(fund, date) {
+    const row = db.prepare(`
+        SELECT COUNT(*) as number_of_rows, SUM(cost) as totalCost, SUM(fair_value) as totalFv
+        FROM holdings WHERE fund = ? AND reporting_period = ?
+    `).get(fund, date);
 
-    let totalFv = data.reduce((sum, obj) => {
-        return sum + (cleanedNumber(obj["Fair Value"]) || 0);
-    }, 0)
-
-    return { totalCost, totalFv, number_of_rows };
+    return {
+        totalCost: row.totalCost || 0,
+        totalFv: row.totalFv || 0,
+        number_of_rows: row.number_of_rows || 0
+    };
 }
 
 
-function getIndustryData(data, date) {
-    const industry_set = new Set();
-    const ind_obj = [];
+function getIndustryData(fund, date) {
+    const rows = db.prepare(`
+        SELECT industry, SUM(fair_value) as totalFV
+        FROM holdings
+        WHERE fund = ? AND reporting_period = ?
+          AND TRIM(industry) != ''
+          AND TRIM(industry) != TRIM(portfolio_company)
+        GROUP BY industry
+        ORDER BY totalFV DESC
+        LIMIT 10
+    `).all(fund, date);
 
-    data = data.filter(obj => normalizePeriod(obj["Reporting Period"]) === date);
-    for (const obj of data) {
-        if (obj["Industry"].trim() !== "" && obj["Industry"].trim() !== obj["Portfolio Company"]) {
-            industry_set.add(cleanIndustry(obj["Industry"]));
-        }
-    }
-
-    for (const ind of industry_set) {
-        const sum = data.reduce((sum, obj) => {
-            if (cleanIndustry(obj["Industry"]) === ind) {
-                return sum + (cleanedNumber(obj["Fair Value"]) || 0);
-            }
-
-            return sum;
-        }, 0);
-        
-        ind_obj.push({ industry: ind, totalFV: sum });
-    }
-    const sortedData = ind_obj.toSorted((a, b) => b.totalFV - a.totalFV);
-
-    return sortedData.slice(0, 10);
+    return rows.map((r) => ({ industry: r.industry, totalFV: r.totalFV || 0 }));
 }
 
+function getTrend_OverPeriod(fund) {
+    const rows = db.prepare(`
+        SELECT reporting_period, SUM(fair_value) as totalFV, SUM(cost) as totalCost
+        FROM holdings
+        WHERE fund = ?
+        GROUP BY reporting_period
+    `).all(fund);
 
-function getTrend_OverPeriod(data) {
-    const period_set = new Set();
-    const per_obj = [];
-
-    for (const obj of data) {
-        period_set.add(normalizePeriod(obj["Reporting Period"]));
-    }
-
-    for (const per of period_set) {
-        const totals = data.reduce((acc, obj) => {
-            if (normalizePeriod(obj["Reporting Period"]) === per) {
-                acc.totalFV += cleanedNumber(obj["Fair Value"]) || 0;
-                acc.totalCost += cleanedNumber(obj["Cost"]) || 0;
-            }
-            return acc;
-        },
-            { totalFV: 0, totalCost: 0 }
-        );
-
-        per_obj.push({
-            period: per,
-            totalFV: totals.totalFV,
-            totalCost: totals.totalCost
-        });
-    }
+    const per_obj = rows.map((r) => ({
+        period: r.reporting_period,
+        totalFV: r.totalFV || 0,
+        totalCost: r.totalCost || 0
+    }));
 
     per_obj.sort((a, b) => new Date(a.period) - new Date(b.period));
 
@@ -80,71 +51,52 @@ function getTrend_OverPeriod(data) {
 }
 
 
-function Type_of_Investment(data, date) {
-    const debt_keyword = ["debt", "loan", "lien", "note", "bond", "revolver", "unitranche", "subordinated", "credit facility", "draw"];
-    const equity_keyword = ["equity", "stock", "warrant", "unit", "partnership", "preferred", "common", "membership", "shares", "interest", "member", "participation"];
+function Type_of_Investment(fund, date) {
+    const rows = db.prepare(`
+        SELECT category, SUM(fair_value) as fairValue
+        FROM holdings
+        WHERE fund = ? AND reporting_period = ?
+        GROUP BY category
+    `).all(fund, date);
 
-    data = data.filter(obj => normalizePeriod(obj["Reporting Period"]) === date);
-
-    const per_obj = { Debt: 0, Equity: 0, Other: 0 };
-
-    for (const obj of data) {
-        const investment_type = (obj["Type of Investment"] || "").toLowerCase();
-        const fairValue = cleanedNumber(obj["Fair Value"]) || 0;
-
-        if (debt_keyword.some(keyword => investment_type.includes(keyword))) {
-            per_obj.Debt += fairValue;
-        } else if (equity_keyword.some(keyword => investment_type.includes(keyword))) {
-            per_obj.Equity += fairValue;
-        } else {
-            per_obj.Other += fairValue;
+    const totals = { Debt: 0, Equity: 0, Other: 0 };
+    
+    for (const r of rows) {
+        if (r.category in totals) {
+            totals[r.category] = r.fairValue || 0;
         }
     }
 
     return [
-        { type: "Debt", fairValue: per_obj.Debt },
-        { type: "Equity", fairValue: per_obj.Equity },
-        { type: "Other", fairValue: per_obj.Other }
+        { type: "Debt", fairValue: totals.Debt },
+        { type: "Equity", fairValue: totals.Equity },
+        { type: "Other", fairValue: totals.Other }
     ];
 }
 
 
-async function fund_fv_data(date) {
-    let calculatedData = [];
-    const filesPath = path.join(process.cwd(), "src/Data");
-    const files = await fs.readdir(filesPath);
-    let funds = files.map((f) => {
-        return f.split(".")[0];
-    })
+function fund_fv_data(date) {
+    const rows = db.prepare(`
+        SELECT fund, SUM(fair_value) as sumfv
+        FROM holdings
+        WHERE reporting_period = ?
+        GROUP BY fund
+        ORDER BY sumfv DESC
+    `).all(date);
 
-    for (let fund of funds) {
-        let sumfv = 0; 
-        const parsedData = await readCSVFile(fund);
-        let data = parsedData.data;
-        data = data.filter(obj => normalizePeriod(obj["Reporting Period"]) === date);
-
-        for (const obj of data) {
-            sumfv += cleanedNumber(obj["Fair Value"]) || 0;
-        }
-
-        calculatedData.push({ fund, sumfv });
-    }
-    return calculatedData.sort((a, b) => b.sumfv - a.sumfv);
-
-    
+    return rows.map((r) => ({ fund: r.fund, sumfv: r.sumfv || 0 }));
 }
 
 
 export async function GET(request, {params}) {
     const {fund, date} = await params;
 
-    const parsedData = await readCSVFile(fund);
-    const sum_cost_fv = sumCost_FV(parsedData.data, date);
-    const industry_data = getIndustryData(parsedData.data, date);
-    const trend_data = getTrend_OverPeriod(parsedData.data);
-    const type_of_investment = Type_of_Investment(parsedData.data, date);   
+    const sum_cost_fv = sumCost_FV(fund, date);
+    const industry_data = getIndustryData(fund, date);
+    const trend_data = getTrend_OverPeriod(fund);
+    const type_of_investment = Type_of_Investment(fund, date);
     let P_L = sum_cost_fv.totalFv - sum_cost_fv.totalCost;
-    let fund_fv = await fund_fv_data(date);
+    let fund_fv = fund_fv_data(date);
 
     let final_obj = {
         fund: fund,
@@ -157,9 +109,8 @@ export async function GET(request, {params}) {
         fund_fv_data: fund_fv,
         number_of_rows: sum_cost_fv.number_of_rows
     }
-    
+
     return NextResponse.json(
-        // parsedData.data,
         final_obj,
         { status: 200 }
     )
